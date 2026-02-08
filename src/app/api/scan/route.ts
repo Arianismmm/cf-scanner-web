@@ -9,16 +9,13 @@ async function checkL7(ip: string, port: number, sni: string, path: string): Pro
   const start = Date.now();
 
   return new Promise((resolve) => {
-    // We use tls.connect to have full control over the handshake
     const socket = tls.connect({
       host: ip,
       port: port,
-      servername: sni, // Crucial for SNI bypass
-      rejectUnauthorized: false, // Bypassing for scanner parity
-      ALPNProtocols: ['h2', 'http/1.1'],
-      timeout: 5000,
+      servername: sni,
+      rejectUnauthorized: false,
+      ALPNProtocols: ['http/1.1'], // Force HTTP/1.1 to simplify header detection
     }, () => {
-      // Once TLS is established, we send a raw HTTP/1.1 Upgrade request
       const request = [
         `GET ${path} HTTP/1.1`,
         `Host: ${sni}`,
@@ -26,24 +23,30 @@ async function checkL7(ip: string, port: number, sni: string, path: string): Pro
         'Connection: Upgrade',
         'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
         'Sec-WebSocket-Version: 13',
-        'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
         '\r\n'
       ].join('\r\n');
 
       socket.write(request);
     });
 
+    socket.setTimeout(4000); // 4s timeout matches cf.py behavior better
+
     socket.on('data', (data) => {
       const response = data.toString();
-      if (response.includes('101') || response.includes('HTTP/1.1 101')) {
-        resolve({ success: true, latency: Date.now() - start });
+      const latency = Date.now() - start;
+      const lowerRes = response.toLowerCase();
+
+      // Mirroring cf.py success criteria: 101 Upgrade, HTTP/2 (unlikely here), or server: cloudflare
+      if (
+        lowerRes.includes('101 switching') ||
+        lowerRes.includes('server: cloudflare') ||
+        lowerRes.includes('cf-ray') ||
+        lowerRes.includes('http/1.1')
+      ) {
+        resolve({ success: true, latency });
       } else {
-        // Even a 400/403/404 from Cloudflare means L7 is working
-        if (response.includes('HTTP/')) {
-            resolve({ success: true, latency: Date.now() - start });
-        } else {
-            resolve({ success: false, latency: -1, error: 'Handshake Rejected' });
-        }
+        resolve({ success: false, latency: -1, error: 'Handshake Rejected' });
       }
       socket.destroy();
     });
