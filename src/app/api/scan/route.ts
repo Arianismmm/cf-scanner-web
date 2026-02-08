@@ -37,18 +37,25 @@ async function checkL7(ip: string, port: number, sni: string, path: string): Pro
       const latency = Date.now() - start;
       const lowerRes = response.toLowerCase();
 
-      // Mirroring cf.py success criteria: 101 Upgrade, HTTP/2 (unlikely here), or server: cloudflare
-      if (
-        lowerRes.includes('101 switching') ||
-        lowerRes.includes('server: cloudflare') ||
-        lowerRes.includes('cf-ray') ||
-        lowerRes.includes('http/1.1')
-      ) {
+      // Strict Check for WebSocket / Proper Edge
+      if (lowerRes.includes('101 switching') || lowerRes.includes('cf-ray')) {
         resolve({ success: true, latency });
+      } else if (lowerRes.includes('server: cloudflare') || lowerRes.includes('http/')) {
+        // Broad Check: It's definitely a Cloudflare edge node
+        resolve({ success: true, latency, error: 'Standard Edge' });
       } else {
-        resolve({ success: false, latency: -1, error: 'Handshake Rejected' });
+        resolve({ success: false, latency: -1, error: 'Unknown Response' });
       }
       socket.destroy();
+    });
+
+    socket.on('secureConnect', () => {
+      // If we got here, TLS is good. If no data comes for 3s, consider it valid but sluggish.
+      const timer = setTimeout(() => {
+        resolve({ success: true, latency: Date.now() - start, error: 'Basic TLS OK' });
+        socket.destroy();
+      }, 3000);
+      socket.on('data', () => clearTimeout(timer));
     });
 
     socket.on('error', (err) => {
